@@ -103,13 +103,17 @@ class PersistentExecutor:
 
     def _run_sync(self, code: str) -> ExecResult:
         buf = io.BytesIO()
+        # NOTE: keep the wrapper alive until after getvalue(). An inline
+        # `with redirect_stdout(TextIOWrapper(buf))` lets the wrapper get
+        # GC'd at block exit, which closes `buf` (classic gotcha).
+        wrapper = io.TextIOWrapper(buf, write_through=True)
         try:
-            with contextlib.redirect_stdout(io.TextIOWrapper(buf, write_through=True)):
+            with contextlib.redirect_stdout(wrapper):
                 exec(compile(code, "<desktop>", "exec"), self.ns)
         except Exception:
-            out = buf.getvalue().decode(errors="replace")
+            out = self._drain(wrapper, buf)
             return ExecResult(ok=False, stdout=out, error=traceback.format_exc())
-        out = buf.getvalue().decode(errors="replace")
+        out = self._drain(wrapper, buf)
         result = ""
         if "_" in self.ns:
             try:
@@ -117,6 +121,15 @@ class PersistentExecutor:
             except Exception:
                 result = "<unrepresentable>"
         return ExecResult(ok=True, stdout=out, result=result)
+
+    @staticmethod
+    def _drain(wrapper: io.TextIOWrapper, buf: io.BytesIO) -> str:
+        try:
+            wrapper.flush()
+            wrapper.detach()  # keep `buf` open; wrapper is discarded
+        except Exception:
+            pass
+        return buf.getvalue().decode(errors="replace")
 
     async def execute(self, code: str, timeout: float = 60.0) -> ExecResult:
         if self.policy_check is not None:

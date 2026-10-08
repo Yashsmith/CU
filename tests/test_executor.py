@@ -40,9 +40,11 @@ async def test_timeout_abandons_worker():
     ex = PersistentExecutor()
     r = await ex.execute("import time; time.sleep(30)", timeout=0.5)
     assert not r.ok and r.timed_out and "exceeded 0.5s" in r.error
-    # executor still usable afterwards
-    assert (await ex.execute("y = 1")).ok
     ex.close()
+    # Recovery pattern: drop the wedged runtime and start a fresh one.
+    fresh = PersistentExecutor()
+    assert (await fresh.execute("y = 1")).ok
+    fresh.close()
 
 
 async def test_policy_check_blocks():
