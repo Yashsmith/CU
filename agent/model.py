@@ -32,7 +32,7 @@ Available actions (reply with ONE JSON object, no other text):
 - {"type": "scroll", "amount": <int>} — positive scrolls down, negative up
 - {"type": "wait", "seconds": <float>}
 - {"type": "done"} — only when the task is fully complete and visible
-
+{browser_line}
 Rules:
 - Coordinates are absolute pixels in the screenshot: x in [0, {width}), y in [0, {height}).
 - If you need text in a field, click the field first (a later step can type).
@@ -70,11 +70,15 @@ def build_messages(
     height: int = 800,
     correction: str | None = None,
     previous_b64: str | None = None,
+    lane: str = "desktop",
 ) -> list[dict[str, Any]]:
+    browser_line = ('- {"type": "goto", "text": "<https URL>"} — navigate the browser lane'
+                    if lane == "browser" else "")
     system = (SYSTEM_PROMPT
                 .replace("{task}", task)
                 .replace("{width}", str(width))
-                .replace("{height}", str(height)))
+                .replace("{height}", str(height))
+                .replace("{browser_line}", browser_line))
     hist_lines: list[str] = []
     for h in (history or [])[-5:]:
         a = h.get("action", h)
