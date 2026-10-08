@@ -32,6 +32,15 @@ SANDBOX_BACKEND=http SANDBOX_URL=http://127.0.0.1:7090 \
   python -m agent.main --task-id 2            # watch the cursor move in noVNC
 ```
 
+### Mac without Docker Desktop: Colima (verified working, Apple Silicon)
+
+```bash
+brew install colima docker docker-compose docker-buildx
+colima start --cpu 4 --memory 8 --disk 60
+docker context use colima
+# then follow "real desktop" above; sandbox runs linux/arm64 natively.
+```
+
 ## Backends
 
 | `SANDBOX_BACKEND` | Body | Use |

@@ -4,7 +4,9 @@
 services:
   sandbox:
     build:
-      context: https://github.com/arthurkatcher/desktop-sandbox.git
+      # NOTE: branch suffix is required — the repo's default branch is `main`,
+      # and compose's git fetcher defaults to `master`.
+      context: https://github.com/arthurkatcher/desktop-sandbox.git#main
       dockerfile: Dockerfile
     image: desktop-sandbox:0.1.0
     container_name: desktop-sandbox
