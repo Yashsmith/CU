@@ -122,3 +122,68 @@ async def test_e2e_live_groq_mock(tmp_path):
     assert res.steps >= 1 and len(sb.actions) >= 1
     meta = json.loads((Path(res.session_dir) / "meta.json").read_text())
     assert meta["status"] in ("done", "max_steps")
+
+
+def _pixels_differ(a: bytes, b: bytes) -> int:
+    import io as _io
+
+    from PIL import Image as _Image
+
+    ia = _Image.open(_io.BytesIO(a)).convert("L")
+    ib = _Image.open(_io.BytesIO(b)).convert("L")
+    ha, hb = ia.histogram(), ib.histogram()
+    return sum(abs(x - y) for x, y in zip(ha, hb)) // 1000
+
+
+@pytest.mark.skipif(os.environ.get("RUN_LIVE") != "1" or not os.environ.get("GROQ_API_KEY"),
+                    reason="live code-exec needs RUN_LIVE=1 + GROQ_API_KEY + real sandbox")
+async def test_e2e_code_exec_real_desktop():
+    """V2 code mode e2e: model writes code, persistent executor runs it with
+    `computer` bound to the REAL sandbox, desktop visibly changes (pixel diff)."""
+    import httpx
+
+    from agent.adapters import AstraCodeAdapter, Observation, OpenAICompatibleAdapter
+    from agent.computer import Computer
+    from agent.executor import PersistentExecutor
+    from sandbox.client import create_sandbox
+
+    key = os.environ["GROQ_API_KEY"]
+    sb = create_sandbox("http")
+    try:
+        await sb.health()
+    except (httpx.HTTPError, OSError) as e:
+        sbc = getattr(sb, "close", None)
+        if sbc:
+            await sbc()
+        pytest.skip(f"real sandbox unreachable: {e}")
+    comp = Computer(sb, settle_wait=0)
+    ex = PersistentExecutor()
+    comp.attach_executor(ex)
+    ex.bind_computer(comp)
+    try:
+        before = await comp.screenshot()
+
+        # 1. Deterministic part: hand-written code through the same path.
+        r = await comp.execute_python(
+            "computer.press('ctrl+alt+t')\n_ = 'terminal requested'")
+        assert r.ok, r.error
+
+        # 2. Model part: Groq writes the next step as code; we run it.
+        inner = OpenAICompatibleAdapter(api_key=key, model="qwen/qwen3.8-27b",
+                                        base_url="https://api.groq.com/openai/v1")
+        obs = Observation(task="A terminal should now be open. Take a screenshot "
+                               "and report its byte size.",
+                          screenshot=before, width=1600, height=900)
+        mres = await AstraCodeAdapter(inner).run(obs.task, obs)
+        assert mres.code and "computer" in mres.code.code, mres.code
+        print(f"\nLIVE model code:\n{mres.code.code}")
+        r2 = await comp.execute_python(mres.code.code, timeout=60)
+        assert r2.ok, r2.error
+
+        after = await comp.screenshot()
+        diff = _pixels_differ(before, after)
+        print(f"\nLIVE code-exec: screenshot bytes {len(before)} -> {len(after)}, diff={diff}")
+        assert diff > 0, "desktop did not visibly change"
+    finally:
+        ex.close()
+        await comp.close()
