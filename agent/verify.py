@@ -68,13 +68,15 @@ async def verify_action(
     after_png: bytes,
     task: str = "",
     judge: Callable[[list[dict[str, Any]]], Awaitable[str]] | None = None,
+    force: bool = False,
 ) -> VerifyResult:
-    """Verify one executed action (PRD §31)."""
+    """Verify one executed action (PRD §31). `force` verifies even when the
+    action would not normally need it (e.g. code-execution steps)."""
     import base64 as _b64
     import json as _json
 
     changed, score = screenshots_differ(before_png, after_png)
-    if not action.needs_settle:
+    if not action.needs_settle and not force:
         return VerifyResult(ok=True, reason="no verification needed", changed=changed,
                             score=score)
     if not changed:
