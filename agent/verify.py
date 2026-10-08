@@ -12,7 +12,9 @@ from typing import Any, Awaitable, Callable
 
 from .actions import Action
 
-CHANGE_THRESHOLD = 5  # histogram-diff score above this counts as "changed"
+CHANGE_THRESHOLD = 200  # raw histogram-diff units; identical frames score 0,
+# a moved cursor (~300) or any real window change (10k+) clears it, while a
+# blinking text caret (~100) does not.
 
 
 def change_score(before: bytes, after: bytes) -> int:
@@ -23,7 +25,7 @@ def change_score(before: bytes, after: bytes) -> int:
     if a.size != b.size:
         return 10 ** 9
     ha, hb = a.histogram(), b.histogram()
-    return sum(abs(x - y) for x, y in zip(ha, hb)) // 1000
+    return sum(abs(x - y) for x, y in zip(ha, hb))
 
 
 def screenshots_differ(before: bytes, after: bytes,
