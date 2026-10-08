@@ -187,3 +187,31 @@ async def test_e2e_code_exec_real_desktop():
     finally:
         ex.close()
         await comp.close()
+
+
+@pytest.mark.skipif(os.environ.get("RUN_LIVE") != "1" or not os.environ.get("GROQ_API_KEY"),
+                    reason="live browser-lane needs RUN_LIVE=1 + GROQ_API_KEY")
+async def test_e2e_browser_lane_with_vision():
+    """V2 browser lane live: real Playwright Chromium + Groq vision sees the page."""
+    from agent.actions import Action
+    from agent.adapters import Observation, OpenAICompatibleAdapter
+    from agent.browser import PlaywrightBrowser
+    from agent.router import route
+
+    assert route("Read https://example.com and summarize it.").lane == "browser"
+    b = PlaywrightBrowser(headless=True)
+    await b.start()
+    try:
+        await b.exec(Action(type="goto", text="https://example.com"))
+        shot = await b.screenshot()
+        key = os.environ["GROQ_API_KEY"]
+        inner = OpenAICompatibleAdapter(api_key=key, model="qwen/qwen3.8-27b",
+                                        base_url="https://api.groq.com/openai/v1")
+        obs = Observation(task="What website is open? If it is example.com, you are done.",
+                          screenshot=shot, width=1600, height=900)
+        res = await inner.run(obs.task, obs)
+        print(f"\nLIVE browser-lane vision: done={res.done} "
+              f"action={res.single_action}")
+        assert res.done or res.single_action is not None
+    finally:
+        await b.close()

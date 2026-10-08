@@ -36,7 +36,7 @@ async def test_browser_goto_title_text_screenshot():
         url = await b.goto("https://example.com")
         assert url.startswith("https://example.com")
         assert "Example" in await b.title()
-        assert "Example Domain" in await b.text()
+        assert "This domain is for use" in await b.text()
         shot = await b.screenshot()
         assert shot.startswith(b"\x89PNG") and len(shot) > 5000
     finally:
@@ -47,8 +47,9 @@ async def test_browser_exec_form_actions():
     b = PlaywrightBrowser(headless=True)
     await b.start()
     try:
-        await b.goto("data:text/html,<input id='q' value=''><button id='b'>Go</button>")
-        out = await b.exec(Action(type="click_type", x=60, y=30, text="UBS"))
+        await b.goto("data:text/html,<input id='q' value='' "
+                     "style='position:absolute;left:50px;top:40px;width:200px;height:24px'>")
+        out = await b.exec(Action(type="click_type", x=150, y=52, text="UBS"))
         assert out["ok"]
         val = await b._page.eval_on_selector("#q", "el => el.value")
         assert val == "UBS"
