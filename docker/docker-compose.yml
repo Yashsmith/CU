@@ -1,0 +1,45 @@
+# V1 desktop body for Linux DevPod / Docker hosts.
+# Builds upstream desktop-sandbox (Xvfb + openbox + Chromium + xterm + VNC + Desktop API).
+# Chromium needs >=1g shm. Ports are loopback-only. Token is mandatory.
+services:
+  sandbox:
+    build:
+      context: https://github.com/arthurkatcher/desktop-sandbox.git
+      dockerfile: Dockerfile
+    image: desktop-sandbox:0.1.0
+    container_name: desktop-sandbox
+    shm_size: 1g
+    init: true
+    ports:
+      - "127.0.0.1:7090:7090"   # Desktop API  (GET /health /screenshot, POST /action)
+      - "127.0.0.1:6080:6080"   # noVNC live view -> http://127.0.0.1:6080/vnc.html
+    environment:
+      SANDBOX_HOST: "0.0.0.0"
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-dev-sandbox-token}
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://127.0.0.1:7090/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # Control plane: tiny V1 agent (brain) talking to the sandbox above.
+  agent:
+    build:
+      context: ..
+      dockerfile: docker/agent.Dockerfile
+    depends_on:
+      sandbox:
+        condition: service_healthy
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY:?set GROQ_API_KEY}
+      MODEL: ${MODEL:-qwen/qwen3.8-27b}
+      SANDBOX_BACKEND: http
+      SANDBOX_URL: http://sandbox:7090
+      SANDBOX_TOKEN: ${SANDBOX_TOKEN:-dev-sandbox-token}
+      MAX_STEPS: ${MAX_STEPS:-30}
+      MAX_RUNTIME: ${MAX_RUNTIME:-300}
+    volumes:
+      - ../sessions:/app/sessions
+    command: ["Open Chromium and search for UBS."]
+    profiles: ["agent"]
