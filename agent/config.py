@@ -28,6 +28,7 @@ class Settings:
         self.openai_api_key: str = _getenv("OPENAI_API_KEY", "")
         self.openai_base_url: str = _getenv(
             "OPENAI_BASE_URL", _getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1"))
+        self.gemini_model: str = _getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
     def validate_for_live(self) -> None:
         if not self.groq_api_key:

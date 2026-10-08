@@ -68,6 +68,25 @@ async def test_verify_matrix():
     assert not r.ok
 
 
+async def test_judge_overrides_pixel_rule():
+    """Stacked windows can be pixel-identical yet successful: the judge sees
+    the end state, pixels are only a hint (real sandbox finding)."""
+    same = _png((5, 5, 5))
+
+    async def yes(msgs):
+        return '{"confirmed": true, "reason": "a terminal is open"}'
+
+    async def no(msgs):
+        return '{"confirmed": false, "reason": "no terminal visible"}'
+
+    r = await verify_action(Action(type="press", key="ctrl+alt+t"), same, same,
+                            "open a terminal", yes)
+    assert r.ok and "terminal is open" in r.reason and not r.changed
+    r = await verify_action(Action(type="press", key="ctrl+alt+t"), same, same,
+                            "open a terminal", no)
+    assert not r.ok
+
+
 def test_judge_messages_shape():
     msgs = judge_messages("t", {"type": "click"}, "eA==", "eQ==")
     assert msgs[0]["role"] == "system"

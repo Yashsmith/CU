@@ -75,7 +75,7 @@ async def test_e2e_demo_task_2_mock(tmp_path):
     assert sb.typed_text[0] == "UBS"
     # V1 success criteria evidence: cursor moved, click landed, text appeared,
     # agent observed again (4 screenshots + final), then stopped.
-    shots = sorted((tmp_path / "e2e2").glob("*.png"))
+    shots = sorted((tmp_path / "e2e2" / "screenshots").glob("*.png"))
     assert len(shots) >= 5
     events = (tmp_path / "e2e2" / "events.jsonl").read_text().splitlines()
     assert len(events) >= 9  # decide+act per step + done

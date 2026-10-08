@@ -1,4 +1,6 @@
 """Browser lane + router tests. Browser tests use REAL headless Chromium (local)."""
+import asyncio
+
 import pytest
 
 from agent.actions import Action
@@ -95,7 +97,11 @@ def test_goto_rejected_by_desktop_computer():
         with pytest.raises(ValueError):
             await comp.execute(Action(type="goto", text="https://example.com"))
 
-    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(go())
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(go())
+    finally:
+        loop.close()
 
 
 def test_goto_validation():

@@ -55,17 +55,37 @@ screenshot always works). Needs `pip install -e ".[local]"` + OS accessibility p
 ## Tests
 
 ```bash
-python -m pytest tests/ -q                       # offline: 37 tests
-RUN_LIVE=1 python -m pytest tests/ -q            # + live Groq vision (uses API credit)
+python -m pytest tests/ -q                       # offline (no network, no keys)
+RUN_LIVE=1 python -m pytest tests/ -q            # + live Groq/GPT-OSS/lanes (uses API credit)
 ```
 
 Layers: `test_actions` (contract) → `test_sandbox` (bodies) → `test_computer`
 (facade) → `test_model` (brain parsing + 1 live vision) → `test_loop` (loop,
-limits, guards) → `test_e2e` (PRD demo tasks + live brain+body).
+limits, guards) → `test_adapters` (matrix) → `test_executor` (runtime) →
+`test_browser` (lane+router) → `test_verify` (verify/recovery/loop) →
+`test_sessions` (state/resume) → `test_control` (takeover) → `test_policy`
+(security) → `test_e2e` (demo tasks + live brain+body+lanes).
 
 ## V1 success checklist (PRD §43)
 
 Desktop isolation, Chromium + terminal, screenshot/mouse/keyboard API, noVNC,
 model sees screenshot, model picks actions, cursor visibly moves, click/type
-occur, multi-step runs, clean stop, step limit. Nothing more — V2 adds
-multi-model adapters, Playwright, verification/recovery, sessions UI.
+occur, multi-step runs, clean stop, step limit. All verified on a real
+Docker desktop (Colima, Apple Silicon).
+
+## V2 (PRD §44)
+
+```bash
+python -m agent.main --provider groq --mode vision_actions --verify "task"
+python -m agent.main --mode code_execution "task"     # persistent Python + computer
+python -m agent.main --lane browser "Read https://example.com"
+python -m agent.main --provider openai_compat --model openai/gpt-oss-20b --mode code_execution "task"
+python -m agent.main --list-sessions / --show-session ID / --resume ID "follow-up"
+python -m agent.main --take-control ID                # human drives via noVNC
+python -m agent.main --release ID                     # ...then hand back
+```
+
+Matrix: `MODEL_PROVIDER` (groq|gemini|openai_compat|astra) × `MODEL_MODE`
+(vision_actions|computer|code_execution). Gemini needs `GEMINI_API_KEY`;
+Astra needs UBS access (adapters implemented + mock-tested, live pending).
+GPT OSS is text-only: code mode yes, vision lanes no.

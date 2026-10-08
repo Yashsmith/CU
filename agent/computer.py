@@ -21,6 +21,11 @@ class Computer:
         self.settle_wait = settle_wait
         self._executor: Any | None = None
         self._browser: Any | None = None
+        self._policy: Any | None = None
+
+    def attach_policy(self, policy: Any) -> None:
+        """PRD §36: every action/code passes the policy before execution."""
+        self._policy = policy
 
     async def health(self) -> dict[str, Any]:
         return await self.backend.health()
@@ -60,6 +65,8 @@ class Computer:
 
     async def execute(self, action: Action) -> dict[str, Any]:
         """Execute one canonical action (PRD §15-16). done is rejected here."""
+        if self._policy is not None:
+            self._policy.enforce(action)  # deny/confirm BEFORE any effect
         if action.is_terminal:
             raise ValueError("done is control-plane only and cannot be executed")
         if action.type == "click_type":
@@ -98,6 +105,9 @@ class Computer:
         """Run code in the persistent runtime (PRD §26)."""
         if self._executor is None:
             raise RuntimeError("no executor attached (attach_executor first)")
+        if self._policy is not None:
+            self._policy.check_code(code)
+            timeout = min(timeout, self._policy.max_exec_seconds)
         return await self._executor.execute(code, timeout=timeout)
 
     def browser(self) -> Any:

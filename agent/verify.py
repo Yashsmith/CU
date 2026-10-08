@@ -81,11 +81,15 @@ async def verify_action(
     if not action.needs_settle and not force:
         return VerifyResult(ok=True, reason="no verification needed", changed=changed,
                             score=score)
-    if not changed:
-        return VerifyResult(ok=False, reason="no visible change after action",
-                            changed=False, score=score)
     if judge is None:
+        if not changed:
+            return VerifyResult(ok=False, reason="no visible change after action",
+                                changed=False, score=score)
         return VerifyResult(ok=True, reason="screen changed", changed=True, score=score)
+    # A judge is available: pixel-diff is only a hint. Identical pixels do NOT
+    # prove failure (e.g. a window opening at the exact same geometry stacks
+    # invisibly), and changed pixels do NOT prove success. Ask the judge either
+    # way; it sees the end state the task actually requires (PRD §31).
     try:
         raw = await judge(judge_messages(
             task, action.model_dump(),
@@ -95,7 +99,7 @@ async def verify_action(
         reason = str(data.get("reason", "judge verdict"))
     except Exception as e:
         return VerifyResult(ok=False, reason=f"judge error: {e}",
-                            changed=True, score=score)
+                            changed=changed, score=score)
     return VerifyResult(ok=confirmed,
-                        reason=f"judge: {reason}",
-                        changed=True, score=score)
+                        reason=f"judge: {reason} (pixels changed={changed})",
+                        changed=changed, score=score)

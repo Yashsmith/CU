@@ -91,12 +91,27 @@ async def test_openai_compat_parses_action(monkeypatch):
 async def test_openai_compat_retry_then_fail(monkeypatch):
     m = OpenAICompatibleAdapter(api_key="k", model="m", base_url="http://x/v1")
 
-    async def fake(messages, json_mode=True):
+    async def fake(messages, json_mode=True, temperature=None):
         return "garbage"
 
     monkeypatch.setattr(m, "_complete", fake)
     with pytest.raises(ValueError, match="invalid action twice"):
         await m.run("t", _obs())
+
+
+async def test_openai_compat_transport_retry(monkeypatch):
+    m = OpenAICompatibleAdapter(api_key="k", model="m", base_url="http://x/v1")
+    calls = {"n": 0}
+
+    async def fake(messages, json_mode=True, temperature=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("400 bad request")
+        return '{"type": "done"}'
+
+    monkeypatch.setattr(m, "_complete", fake)
+    res = await m.run("t", _obs())
+    assert res.done and calls["n"] == 2
 
 
 def test_openai_compat_requires_key():
@@ -165,11 +180,24 @@ def test_extract_code_fenced_raw_and_json():
 async def test_code_adapter_wraps_inner():
     class FakeInner(OpenAICompatibleAdapter):
         async def complete_text(self, messages):
+            # vision code prompt: text + screenshot image
+            assert isinstance(messages[1]["content"], list)
+            assert any(p.get("type") == "image_url" for p in messages[1]["content"])
             return "```python\ncomputer.click(1, 2)\n```"
 
     inner = FakeInner(api_key="k", model="m", base_url="http://x")
     res = await AstraCodeAdapter(inner).run("t", _obs())
     assert res.code and res.code.code == "computer.click(1, 2)"
+
+
+async def test_code_adapter_done_convention():
+    class DoneInner(OpenAICompatibleAdapter):
+        async def complete_text(self, messages):
+            return "```\ndone\n```"
+
+    res = await AstraCodeAdapter(
+        DoneInner(api_key="k", model="m", base_url="http://x")).run("t", _obs())
+    assert res.done and res.code is None
 
 
 # ------------------------------------------------------------------ live ----

@@ -7,15 +7,14 @@ browser lane, verification + recovery (PRD §§28-32).
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from .actions import Action
 from .computer import Computer
+from .sessions import SessionStore  # noqa: F401  (re-export; store lives in sessions.py)
 
 LOOP_GUARD_RADIUS = 10
 LOOP_GUARD_REPEATS = 3
@@ -33,40 +32,18 @@ class LoopResult:
     events: list[dict[str, Any]] = field(default_factory=list)
 
 
-class SessionStore:
-    """Append-only session: meta.json + events.jsonl + step PNGs (cf. desktop-use)."""
-
-    def __init__(self, root: str | Path, session_id: str | None = None) -> None:
-        self.session_id = session_id or uuid.uuid4().hex[:12]
-        self.dir = Path(root) / self.session_id
-        self.dir.mkdir(parents=True, exist_ok=True)
-        self._seq = 0
-
-    def write_meta(self, task: str, model: str) -> None:
-        (self.dir / "meta.json").write_text(json.dumps(
-            {"id": self.session_id, "task": task, "model": model,
-             "started": time.time(), "status": "running"}, indent=2))
-
-    def log_event(self, event: dict[str, Any]) -> dict[str, Any]:
-        self._seq += 1
-        event = {"seq": self._seq, "t": time.time(), **event}
-        with open(self.dir / "events.jsonl", "a") as f:
-            f.write(json.dumps(event) + "\n")
-        return event
-
-    def save_shot(self, step: int, png: bytes, final: bool = False) -> str:
-        name = "final.png" if final else f"{step}.png"
-        (self.dir / name).write_bytes(png)
-        return name
-
-    def finish(self, status: str) -> None:
-        meta_path = self.dir / "meta.json"
-        try:
-            meta = json.loads(meta_path.read_text())
-        except FileNotFoundError:
-            meta = {"id": self.session_id}
-        meta.update({"status": status, "ended": time.time()})
-        meta_path.write_text(json.dumps(meta, indent=2))
+def _model_label(model: Any, adapter: Any, model_name: str) -> str:
+    if model_name:
+        return model_name
+    for obj in (model, adapter):
+        label = getattr(obj, "model", None)
+        if isinstance(label, str) and label:
+            return label
+    inner = getattr(adapter, "model", None)  # e.g. GroqVisionAdapter.model
+    label = getattr(inner, "model", None)
+    if isinstance(label, str) and label:
+        return label
+    return "?"
 
 
 def _same_spot(a: Action, b: Action, radius: int = LOOP_GUARD_RADIUS) -> bool:
@@ -94,14 +71,25 @@ async def run(
     judge: Callable[[list[dict[str, Any]]], Awaitable[str]] | None = None,
     max_recovery: int = 2,  # PRD §32 MAX_RETRIES (only when verify=True)
     control: Any | None = None,  # ControlState for pause/takeover (PRD §34)
+    resume_from: str | None = None,  # PRD §33: seed history from a past session
 ) -> LoopResult:
     """Run until done / limits / loop / error (V1) / recovery-exhausted / paused (V2)."""
     from .recovery import RecoveryPolicy, alternate_action
     from .verify import verify_action
 
     store = SessionStore(session_root, session_id)
-    store.write_meta(task, model_name or getattr(model or adapter, "model", "?"))
     history: list[dict[str, Any]] = []
+    step = 0
+    if resume_from:
+        prev = SessionStore.load(session_root, resume_from)
+        history = [dict(h) for h in prev.history]
+        step = prev.step
+        history.append({"resumed_from": resume_from,
+                        "note": f"continuing after step {prev.step} "
+                                f"(status was {prev.status})"})
+    store.write_meta(task, _model_label(model, adapter, model_name),
+                     extra={"resumed_from": resume_from or ""})
+    store.set_step(step)
     events: list[dict[str, Any]] = []
     recent_clicks: list[Action] = []
     state: dict[str, Any] = {}
@@ -143,7 +131,6 @@ async def run(
         return LoopResult(status, step, task, store.session_id, str(store.dir),
                           history, events)
 
-    step = 0
     previous_shot: bytes | None = None
     while True:
         if control is not None and control.paused():
@@ -151,6 +138,9 @@ async def run(
             store.finish("paused")
             return LoopResult("paused", step, task, store.session_id, str(store.dir),
                               history, events)
+        if control is not None and control.should_stop():
+            emit({"kind": "control", "step": step, "detail": "stopped by operator"})
+            return finish("stopped", step)
         if time.monotonic() - start > max_runtime:
             emit({"kind": "limit", "step": step, "detail": f"MAX_RUNTIME {max_runtime}s exceeded"})
             return finish("timeout", step)
@@ -158,6 +148,7 @@ async def run(
             emit({"kind": "limit", "step": step, "detail": f"MAX_STEPS {max_steps} exceeded"})
             return finish("max_steps", step)
         step += 1
+        store.set_step(step)
         try:
             shot = await observe()
         except Exception as e:
@@ -181,7 +172,8 @@ async def run(
 
                     obs = Observation(task=task, screenshot=shot, width=width,
                                       height=height, history=history,
-                                      previous_screenshot=previous_shot)
+                                      previous_screenshot=previous_shot,
+                                      lane=lane)
                     res = await adapter.run(task, obs, state)
                     if res.reasoning.startswith("previous_response_id="):
                         state["previous_response_id"] = res.reasoning.split("=", 1)[1]

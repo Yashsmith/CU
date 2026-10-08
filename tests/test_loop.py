@@ -43,7 +43,8 @@ async def test_loop_success_writes_session(tmp_path):
     # session artifacts
     d = Path(res.session_dir)
     assert (d / "meta.json").exists() and (d / "events.jsonl").exists()
-    assert (d / "1.png").exists() and (d / "final.png").exists()
+    assert (d / "screenshots" / "1.png").exists()
+    assert (d / "screenshots" / "final.png").exists()
     meta = json.loads((d / "meta.json").read_text())
     assert meta["status"] == "done"
     kinds = [json.loads(line)["kind"] for line in (d / "events.jsonl").read_text().splitlines()]

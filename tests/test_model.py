@@ -66,6 +66,31 @@ async def test_decide_raises_after_two_failures(monkeypatch):
         await m.decide("t", _tiny_png())
 
 
+async def test_decide_transport_retry(monkeypatch):
+    """API-level 400 (e.g. tool-call instead of JSON) retries warmer once."""
+    m = GroqModel(api_key="k")
+    calls = {"n": 0}
+
+    def fake(messages, temperature=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("400 json_validate_failed")
+        assert temperature == 0.4
+        return '{"type": "done"}'
+
+    monkeypatch.setattr(m, "_complete", fake)
+    a = await m.decide("t", _tiny_png())
+    assert a.type == "done" and calls["n"] == 2
+
+
+async def test_decide_transport_double_failure(monkeypatch):
+    m = GroqModel(api_key="k")
+    monkeypatch.setattr(m, "_complete", lambda *a, **k: (_ for _ in ()).throw(
+        RuntimeError("down")))
+    with pytest.raises(ValueError, match="model API failed twice"):
+        await m.decide("t", _tiny_png())
+
+
 def test_model_requires_key():
     with pytest.raises(ValueError):
         GroqModel(api_key="")
