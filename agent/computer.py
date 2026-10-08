@@ -1,7 +1,11 @@
-"""PRD §11 Computer — the tiny typed facade over any sandbox backend.
+"""PRD §11 + §29 Computer — tiny typed facade over any sandbox backend.
+
+V1 surface (screenshot/click/.../execute) is unchanged. V2 bridge adds:
+  attach_executor() + execute_python()  — persistent code runtime (PRD §26)
+  attach_browser()  + browser()         — Playwright lane handle (PRD §28)
 
 No model logic belongs here. Coordinates are absolute desktop pixels
-matching the latest screenshot (default desktop 1280x800).
+matching the latest screenshot.
 """
 from __future__ import annotations
 
@@ -15,6 +19,8 @@ class Computer:
     def __init__(self, backend: Any, settle_wait: float = 0.5) -> None:
         self.backend = backend
         self.settle_wait = settle_wait
+        self._executor: Any | None = None
+        self._browser: Any | None = None
 
     async def health(self) -> dict[str, Any]:
         return await self.backend.health()
@@ -70,3 +76,32 @@ class Computer:
         close = getattr(self.backend, "close", None)
         if close is not None:
             await close()
+
+    # ------------------------------------------------- V2 bridge (PRD §29) ---
+    def attach_executor(self, executor: Any) -> None:
+        """Bind a PersistentExecutor; also exposes this Computer inside it."""
+        self._executor = executor
+        try:
+            executor.bind_computer(self, asyncio.get_running_loop())
+        except RuntimeError:
+            pass  # no running loop (tests); bind explicitly later
+
+    def attach_browser(self, browser: Any) -> None:
+        self._browser = browser
+        if self._executor is not None:
+            try:
+                self._executor.bind("browser", browser)
+            except Exception:
+                pass
+
+    async def execute_python(self, code: str, timeout: float = 60.0) -> Any:
+        """Run code in the persistent runtime (PRD §26)."""
+        if self._executor is None:
+            raise RuntimeError("no executor attached (attach_executor first)")
+        return await self._executor.execute(code, timeout=timeout)
+
+    def browser(self) -> Any:
+        """Playwright lane handle (PRD §28)."""
+        if self._browser is None:
+            raise RuntimeError("no browser attached (attach_browser first)")
+        return self._browser
