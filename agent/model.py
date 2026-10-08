@@ -141,6 +141,10 @@ class GroqModel:
         content = resp.choices[0].message.content or ""
         return content.strip()
 
+    async def complete_text(self, messages: list[dict[str, Any]]) -> str:
+        """Raw text completion (V2 code mode). Sync SDK call run in a thread."""
+        return await asyncio.to_thread(self._complete, messages)
+
     async def decide(
         self,
         task: str,

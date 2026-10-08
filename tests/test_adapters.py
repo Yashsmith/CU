@@ -60,7 +60,17 @@ def test_gemini_defaults():
 # ------------------------------------------------- Groq wrap (V1 compat) -----
 async def test_groq_adapter_passthrough(monkeypatch):
     gm = GroqModel(api_key="k")
-    monkeypatch.setattr(gm, "_complete", lambda messages: '{"type":"done"}')
+
+    async def fake(messages):
+        return '{"type":"done"}'
+
+    monkeypatch.setattr(gm, "complete_text", fake)
+
+    async def fake_decide(**kwargs):
+        from agent.actions import Action
+        return Action(type="done")
+
+    monkeypatch.setattr(gm, "decide", fake_decide)
     res = await GroqVisionAdapter(gm).run("t", _obs())
     assert res.done and res.actions == []
 
@@ -69,14 +79,22 @@ async def test_groq_adapter_passthrough(monkeypatch):
 async def test_openai_compat_parses_action(monkeypatch):
     m = OpenAICompatibleAdapter(api_key="k", model="openai/gpt-oss-20b",
                                 base_url="http://x/v1")
-    monkeypatch.setattr(m, "_complete", lambda messages: '{"type":"click","x":5,"y":6}')
+
+    async def fake(messages, json_mode=True):
+        return '{"type":"click","x":5,"y":6}'
+
+    monkeypatch.setattr(m, "_complete", fake)
     res = await m.run("t", _obs())
     assert res.single_action and (res.single_action.x, res.single_action.y) == (5, 6)
 
 
 async def test_openai_compat_retry_then_fail(monkeypatch):
     m = OpenAICompatibleAdapter(api_key="k", model="m", base_url="http://x/v1")
-    monkeypatch.setattr(m, "_complete", lambda messages: "garbage")
+
+    async def fake(messages, json_mode=True):
+        return "garbage"
+
+    monkeypatch.setattr(m, "_complete", fake)
     with pytest.raises(ValueError, match="invalid action twice"):
         await m.run("t", _obs())
 
@@ -123,14 +141,13 @@ def test_astra_call_output_shape():
     assert out["output"]["image_url"].startswith("data:image/png;base64,")
 
 
-def test_astra_adapter_helpers_offline():
+async def test_astra_adapter_helpers_offline():
     ad = AstraComputerAdapter()
     acts = ad.translate({"type": "computer_call",
                          "actions": [{"type": "click", "x": 1, "y": 2}]})
     assert len(acts) == 1
     with pytest.raises(RuntimeError):
-        import asyncio
-        asyncio.get_event_loop().run_until_complete(ad.run("t", _obs()))
+        await ad.run("t", _obs())
 
 
 # ------------------------------------------------- Astra code mode (PRD §26) --
@@ -147,7 +164,7 @@ def test_extract_code_fenced_raw_and_json():
 
 async def test_code_adapter_wraps_inner():
     class FakeInner(OpenAICompatibleAdapter):
-        async def _complete(self, messages):
+        async def complete_text(self, messages):
             return "```python\ncomputer.click(1, 2)\n```"
 
     inner = FakeInner(api_key="k", model="m", base_url="http://x")
@@ -156,6 +173,22 @@ async def test_code_adapter_wraps_inner():
 
 
 # ------------------------------------------------------------------ live ----
+@pytest.mark.skipif(os.environ.get("RUN_LIVE") != "1" or not os.environ.get("GEMINI_API_KEY"),
+                    reason="needs RUN_LIVE=1 + GEMINI_API_KEY")
+async def test_live_gemini_vision():
+    """Gemini via OpenAI-compat endpoint sees an image and returns an Action."""
+    from sandbox.mock import MockSandbox
+
+    key = os.environ["GEMINI_API_KEY"]
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    shot = await MockSandbox().screenshot()
+    res = await GeminiAdapter(api_key=key, model=model).run(
+        "Click the Chromium icon.",
+        Observation(task="t", screenshot=shot, width=1280, height=800))
+    assert res.single_action or res.done
+    print(f"\nLIVE gemini action: {res.single_action}")
+
+
 @pytest.mark.skipif(os.environ.get("RUN_LIVE") != "1" or not os.environ.get("GROQ_API_KEY"),
                     reason="needs RUN_LIVE=1 + GROQ_API_KEY")
 async def test_live_gpt_oss_text_generation():
@@ -168,7 +201,7 @@ async def test_live_gpt_oss_text_generation():
                          headers={"Authorization": f"Bearer {key}"},
                          json={"model": "openai/gpt-oss-20b",
                                "messages": [{"role": "user",
-                                             "content": 'Reply with exactly {"code": "x = 40 + 2"} and nothing else.'}],
+                                             "content": 'Reply with exactly {"code": "x = 40 + 2"} as JSON and nothing else.'}],
                                "temperature": 0, "max_tokens": 100,
                                "response_format": {"type": "json_object"}})
         r.raise_for_status()

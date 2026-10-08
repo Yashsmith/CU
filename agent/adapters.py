@@ -113,19 +113,26 @@ class OpenAICompatibleAdapter(ModelAdapter):
         self.temperature = temperature
         self.max_tokens = max_tokens
 
-    async def _complete(self, messages: list[dict[str, Any]]) -> str:
+    async def _complete(self, messages: list[dict[str, Any]],
+                        json_mode: bool = True) -> str:
         import httpx
 
+        body: dict[str, Any] = {"model": self.model, "messages": messages,
+                                "temperature": self.temperature,
+                                "max_tokens": self.max_tokens}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                json={"model": self.model, "messages": messages,
-                      "temperature": self.temperature,
-                      "max_tokens": self.max_tokens,
-                      "response_format": {"type": "json_object"}})
+                json=body)
             r.raise_for_status()
             return (r.json()["choices"][0]["message"]["content"] or "").strip()
+
+    async def complete_text(self, messages: list[dict[str, Any]]) -> str:
+        """Raw text completion (for code mode and other non-action uses)."""
+        return await self._complete(messages, json_mode=False)
 
     async def run(self, task: str, observation: Observation,
                   state: dict[str, Any] | None = None) -> ModelResult:
