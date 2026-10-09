@@ -159,11 +159,14 @@ async def run_task(task: str, args: argparse.Namespace) -> int:
         if args.backend == "local" and real_input_enabled():
             import asyncio as _aio
 
-            print("\n*** VISIBLE TAKEOVER: your cursor is about to move on its own. ***")
-            print("Hands off mouse + keyboard. ABORT any time: slam the cursor")
-            print("into any screen corner (failsafe), or press Ctrl+C here.\n")
+            print("\n================================================================")
+            print("  VISIBLE TAKEOVER — LIFT YOUR HANDS OFF mouse + keyboard NOW.")
+            print("  The cursor is about to move on its own, in front of you.")
+            print("  Touching the mouse ABORTS the run safely (by design).")
+            print("  ABORT any time: slam cursor into a screen corner, or Ctrl+C.")
+            print("================================================================\n")
             for i in (3, 2, 1):
-                print(f"  starting in {i}...", flush=True)
+                print(f"  starting in {i} — hands off...", flush=True)
                 await _aio.sleep(1)
         print(f"task: {task}\nbackend: {args.backend}  provider: {args.provider or settings.provider}  "
               f"model: {model_name}  mode: {mode}  lane: {lane}  verify: {args.verify}  "

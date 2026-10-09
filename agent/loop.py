@@ -46,6 +46,12 @@ def _model_label(model: Any, adapter: Any, model_name: str) -> str:
     return "?"
 
 
+def _is_failsafe(error: Exception) -> bool:
+    """pyautogui FailSafeException means the human grabbed the mouse —
+    treat as operator takeover, never as a retryable error."""
+    return type(error).__name__ == "FailSafeException"
+
+
 def _same_spot(a: Action, b: Action, radius: int = LOOP_GUARD_RADIUS) -> bool:
     if a.type != b.type or a.x is None or b.x is None or a.y is None or b.y is None:
         return False
@@ -84,9 +90,14 @@ async def run(
         prev = SessionStore.load(session_root, resume_from)
         history = [dict(h) for h in prev.history]
         step = prev.step
-        history.append({"resumed_from": resume_from,
-                        "note": f"continuing after step {prev.step} "
-                                f"(status was {prev.status})"})
+        note = (f"continuing after step {prev.step} "
+                f"(status was {prev.status})")
+        if lane == "local":
+            # The Mac screen kept living while parked: the frontmost app is
+            # almost certainly NOT what history assumes. Re-establish first.
+            note += (" IMPORTANT: re-activate the target app with an "
+                     "'activate' action before clicking/typing anything.")
+        history.append({"resumed_from": resume_from, "note": note})
     store.write_meta(task, _model_label(model, adapter, model_name),
                      extra={"resumed_from": resume_from or ""})
     store.set_step(step)
@@ -247,6 +258,15 @@ async def run(
                 emit({"kind": "act", "step": step,
                       "detail": f"{action.type} -> {str(result)[:120]}"})
         except Exception as e:
+            if _is_failsafe(e):
+                # Human grabbed the mouse mid-step: park immediately, like a
+                # takeover. Never retry into a human-held cursor.
+                emit({"kind": "control", "step": step,
+                      "detail": "operator took the mouse (failsafe) — parking"})
+                history.append({"action": (action.model_dump()
+                                           if code_request is None else {"code": True}),
+                                "error": "failsafe: human took control"})
+                return finish("paused", step)
             exec_error = f"execute failed: {e}"
             history.append({"action": (action.model_dump()
                                        if code_request is None else {"code": True}),

@@ -16,6 +16,9 @@ CHANGE_THRESHOLD = 200  # raw histogram-diff units; identical frames score 0,
 # a moved cursor (~300) or any real window change (10k+) clears it, while a
 # blinking text caret (~100) does not.
 
+BLANK_SPAN = 8  # luma max-min below this => capture glitch, re-shoot
+BLANK_RETRIES = 2
+
 
 def change_score(before: bytes, after: bytes) -> int:
     from PIL import Image
@@ -32,6 +35,18 @@ def screenshots_differ(before: bytes, after: bytes,
                        threshold: int = CHANGE_THRESHOLD) -> tuple[bool, int]:
     score = change_score(before, after)
     return score > threshold, score
+
+
+def is_blank(png: bytes, span: int = BLANK_SPAN) -> bool:
+    """True when the frame is (near-)uniform — a capture glitch, not a desktop.
+
+    Real desktops always span wide luma (wallpaper, chrome, text). A pure
+    white/black frame means the compositor handed scrot an empty buffer.
+    """
+    from PIL import Image
+
+    extrema = Image.open(io.BytesIO(png)).convert("L").getextrema()
+    return (extrema[1] - extrema[0]) < span
 
 
 @dataclass

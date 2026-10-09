@@ -24,7 +24,9 @@ BLOCKED_MODULES = frozenset({
 })
 BLOCKED_CALLS = frozenset({"eval", "exec", "open", "__import__", "compile", "input"})
 # Combos that close/kill apps or sessions — confirmation-gated, never silent.
-DESTRUCTIVE_COMBOS = frozenset({"alt+f4", "ctrl+q", "ctrl+shift+q"})
+# (Both Linux and macOS spellings: the local Mac lane must never cmd+q you.)
+DESTRUCTIVE_COMBOS = frozenset({"alt+f4", "ctrl+q", "ctrl+shift+q",
+                                "cmd+q", "command+q", "cmd+shift+q"})
 # Shell-shaped payloads inside code strings — confirmation-gated.
 DANGEROUS_CODE_RE = re.compile(
     r"rm\s+-rf|mkfs|:\(\)\s*\{|shutdown|reboot|halt|poweroff|dd\s+if=|"

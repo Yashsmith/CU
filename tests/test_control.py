@@ -131,3 +131,34 @@ async def test_pause_survives_slow_model(tmp_path):
     # finishes the in-flight step, then parks — never half-applies.
     assert res.status in ("paused", "done")
     await asyncio.sleep(0)
+
+
+class FailSafeError(RuntimeError):
+    pass
+
+
+FailSafeError.__name__ = "FailSafeException"
+
+
+async def test_failsafe_parks_instead_of_retrying(tmp_path):
+    """Human grabs the mouse mid-run -> park with 'paused', no retry storm."""
+    import agent.loop as _loop
+
+    real_is = _loop._is_failsafe
+    assert real_is(FailSafeError("corner")) is True
+    assert real_is(RuntimeError("other")) is False
+
+    class Grabbed(MockSandbox):
+        async def act(self, payload):
+            raise FailSafeError("corner")
+
+    comp = Computer(Grabbed(), settle_wait=0)
+    model = DecideModel([Action(type="click", x=1, y=1),
+                         Action(type="click", x=1, y=1),
+                         Action(type="done")])
+    res = await run("t", model, comp, max_steps=10, max_runtime=30,
+                    settle_wait=0, session_root=tmp_path, session_id="fs",
+                    verbose=False)
+    assert res.status == "paused" and res.steps == 1 and model.calls == 1
+    kinds = [e["kind"] for e in res.events]
+    assert "control" in kinds and "recover" not in kinds
