@@ -115,7 +115,8 @@ class SessionStore:
                 elif detail.get("type") in ("click", "double_click",
                                             "right_click", "move", "type",
                                             "press", "scroll", "wait",
-                                            "click_type", "goto", "done"):
+                                            "click_type", "goto", "activate",
+                                            "done"):
                     history.append({"action": detail})  # V1 flat form
             step = max(step, int(ev.get("step", 0)))
         return Session(id=session_id, task=meta.get("task", ""),

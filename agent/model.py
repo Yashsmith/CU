@@ -31,7 +31,7 @@ Available actions (reply with ONE JSON object, no other text):- {"type": "click"
 - {"type": "scroll", "amount": <int>} — positive scrolls down, negative up
 - {"type": "wait", "seconds": <float>}
 - {"type": "done"} — only when the task is fully complete and visible
-{browser_line}
+{browser_line}{local_line}
 - Output ONE raw JSON object only. Never use tool calls, <function=> tags,
   or any other format — plain JSON, nothing else.
 Rules:
@@ -80,11 +80,18 @@ def build_messages(
 ) -> list[dict[str, Any]]:
     browser_line = ('- {"type": "goto", "text": "<https URL>"} — navigate the browser lane'
                     if lane == "browser" else "")
+    local_line = ('- {"type": "activate", "text": "<App name>"} — launch + bring a Mac app '
+                  "to the FRONT (this is how you open things here).\n"
+                  "This is a real Mac desktop, not a VM: coordinates are screen points, "
+                  "the user watches every move. Prefer activate over Spotlight typing. "
+                  "macOS shortcuts: press cmd+space for Spotlight, cmd+q quits (avoid)."
+                  if lane == "local" else "")
     system = (SYSTEM_PROMPT
                 .replace("{task}", task)
                 .replace("{width}", str(width))
                 .replace("{height}", str(height))
-                .replace("{browser_line}", browser_line))
+                .replace("{browser_line}", browser_line)
+                .replace("{local_line}", local_line))
     hist_lines: list[str] = []
     for h in (history or [])[-5:]:
         a = h.get("action", h)

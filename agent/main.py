@@ -107,6 +107,7 @@ async def run_task(task: str, args: argparse.Namespace) -> int:
     from agent.policy import SecurityPolicy
     from agent.router import route
     from sandbox.client import create_sandbox
+    from sandbox.local import real_input_enabled
 
     adapter, settings, model_name, mode = _build_adapter(args)
     sb = create_sandbox(args.backend, base_url=args.sandbox_url,
@@ -139,8 +140,7 @@ async def run_task(task: str, args: argparse.Namespace) -> int:
                 executor.bind("browser", browser)
 
         judge = None
-        if args.verify:
-            async def judge(messages, _adapter=adapter):  # noqa: B023
+        if args.verify:            async def judge(messages, _adapter=adapter):  # noqa: B023
                 complete = getattr(_adapter, "complete_text", None)
                 if complete is None:
                     for attr in ("inner", "model"):  # code adapters nest; groq wraps
@@ -155,6 +155,15 @@ async def run_task(task: str, args: argparse.Namespace) -> int:
         control = None
         if args.session_id:
             control = ControlState(Path(settings.session_dir) / args.session_id)
+        if args.backend == "local" and real_input_enabled():
+            import asyncio as _aio
+
+            print("\n*** VISIBLE TAKEOVER: your cursor is about to move on its own. ***")
+            print("Hands off mouse + keyboard. ABORT any time: slam the cursor")
+            print("into any screen corner (failsafe), or press Ctrl+C here.\n")
+            for i in (3, 2, 1):
+                print(f"  starting in {i}...", flush=True)
+                await _aio.sleep(1)
         print(f"task: {task}\nbackend: {args.backend}  provider: {args.provider or settings.provider}  "
               f"model: {model_name}  mode: {mode}  lane: {lane}  verify: {args.verify}  "
               f"max_steps: {args.max_steps}  max_runtime: {args.max_runtime}s")
@@ -173,6 +182,87 @@ async def run_task(task: str, args: argparse.Namespace) -> int:
         await comp.close()
     print(f"\nRESULT: status={res.status} steps={res.steps} session={res.session_dir}")
     return 0 if res.status == "done" else 3
+
+
+def _terminal_host_app() -> str:
+    """Which macOS app must hold Accessibility/Screen-Recording for THIS shell."""
+    import subprocess as _sp
+
+    try:
+        pid = os.getppid()
+        for _ in range(6):
+            out = _sp.run(["ps", "-p", str(pid), "-o", "comm="],
+                          capture_output=True, text=True, timeout=5)
+            comm = out.stdout.strip()
+            low = comm.lower()
+            if "code" in low and "helper" not in low:
+                return "Code (Visual Studio Code)"
+            for name in ("Terminal", "iTerm2", "Alacritty", "Warp", "Kitty",
+                         "WezTerm", "Ghostty"):
+                if name.lower() in low:
+                    return name
+            ppid = _sp.run(["ps", "-p", str(pid), "-o", "ppid="],
+                           capture_output=True, text=True, timeout=5)
+            pid = int(ppid.stdout.strip())
+    except Exception:
+        pass
+    return "your terminal app (see System Settings)"
+
+
+async def doctor(backend: str, sandbox_url: str, token: str) -> int:
+    """Visible-mode readiness: screenshots, scale, injection, focus (PRD: watch it)."""
+    from agent.computer import Computer
+    from sandbox.client import create_sandbox
+
+    print(f"backend: {backend}")
+    sb = create_sandbox(backend, base_url=sandbox_url, token=token or None) \
+        if backend == "http" else create_sandbox(backend)
+    comp = Computer(sb, settle_wait=0)
+    try:
+        h = await comp.health()
+        print(f"health: {h}")
+        w, hh = await comp.size()
+        print(f"size: {w}x{hh}")
+        shot = await comp.screenshot()
+        print(f"screenshot: {len(shot)} bytes")
+        if backend == "local":
+            from PIL import Image as _Image
+
+            import io as _io
+
+            img = _Image.open(_io.BytesIO(shot))
+            print(f"shot pixels: {img.width}x{img.height} (model coords == points 1:1 "
+                  f"-> {img.width == w and img.height == hh})")
+            extrema = img.convert("L").getextrema()
+            print(f"luma range: {extrema} "
+                  f"({'BLACK — Screen Recording missing' if extrema == (0, 0) else 'has content ✓'})")
+            try:
+                import pyautogui as _pg
+
+                print(f"pyautogui points: {_pg.size().width}x{_pg.size().height}")
+            except Exception as e:
+                print(f"pyautogui unavailable: {e}")
+            from sandbox.local import frontmost_app, real_input_enabled
+            try:
+                print(f"frontmost app: {frontmost_app()}")
+            except Exception as e:
+                print(f"frontmost query failed: {e}")
+            host = _terminal_host_app()
+            print(f"terminal host app (needs the macOS permissions): {host}")
+            print(f"ALLOW_REAL_INPUT={'1' if real_input_enabled() else '0 (input will refuse)'}")
+            print("\nIf injection is dead, grant + RESTART the terminal:")
+            print("  System Settings > Privacy & Security > Accessibility > + "
+                  + host)
+            print("  System Settings > Privacy & Security > Screen Recording > + "
+                  + host)
+            print("  ...then Quit + reopen the terminal app completely.")
+        print("DOCTOR done.")
+        return 0
+    except Exception as e:
+        print(f"DOCTOR FAILED: {e}")
+        return 1
+    finally:
+        await comp.close()
 
 
 def _sessions_cmd(args: argparse.Namespace) -> int:
@@ -230,6 +320,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Run one of the 5 PRD demo tasks")
     p.add_argument("--list-tasks", action="store_true")
     p.add_argument("--probe", action="store_true", help="No-model health/screenshot/input check")
+    p.add_argument("--doctor", action="store_true",
+                   help="Visible-mode readiness (screenshots, scale, perms)")
     p.add_argument("--backend", default=os.environ.get("SANDBOX_BACKEND", "mock"),
                    choices=["http", "mock", "local"])
     p.add_argument("--sandbox-url", default=os.environ.get("SANDBOX_URL", "http://127.0.0.1:7090"))
@@ -241,8 +333,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="groq | gemini | openai_compat | astra")
     p.add_argument("--mode", default=os.environ.get("MODEL_MODE", "vision_actions"),
                    help="vision_actions | computer | code_execution")
-    p.add_argument("--lane", default=None, choices=["browser", "desktop"],
-                   help="Force lane (default: auto-route)")
+    p.add_argument("--lane", default=None, choices=["browser", "desktop", "local"],
+                   help="Force lane (default: auto-route; local = your Mac screen)")
     p.add_argument("--verify", action="store_true", help="PRD §31 verification + §32 recovery")
     p.add_argument("--show-browser", action="store_true",
                    help="Headed browser lane (needs display)")
@@ -287,6 +379,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.probe:
         return asyncio.run(probe(args.backend, args.sandbox_url, args.sandbox_token))
+    if args.doctor:
+        return asyncio.run(doctor(args.backend, args.sandbox_url, args.sandbox_token))
     if args.list_sessions or args.show_session or args.pause or args.resume_id \
             or args.take_control or args.release or args.control_status:
         return _sessions_cmd(args)

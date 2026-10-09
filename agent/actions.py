@@ -34,6 +34,7 @@ ActionType = Literal[
     "wait",
     "click_type",
     "goto",  # V2 browser lane only (PRD §28): navigate to a URL
+    "activate",  # local-Mac lane only: launch + bring app to front (visible mode)
     "done",
 ]
 
@@ -98,6 +99,9 @@ class Action(BaseModel):
         elif t == "goto":
             if not self.text or not self.text.startswith(("http://", "https://")):
                 raise ValueError("goto requires an http(s) URL in text")
+        elif t == "activate":
+            if not (self.text or "").strip():
+                raise ValueError("activate requires an application name in text")
         elif t == "scroll":
             if self.amount is None and self.direction is None:
                 raise ValueError("scroll requires amount or direction")
@@ -143,6 +147,8 @@ class Action(BaseModel):
             return {"type": "click_type", "x": self.x, "y": self.y, "text": self.text}
         if self.type == "goto":
             raise ValueError("goto is browser-lane only (no desktop-sandbox mapping)")
+        if self.type == "activate":
+            raise ValueError("activate is local-Mac-lane only")
         raise ValueError(f"action {self.type!r} is control-plane only (done)")
 
     @property
@@ -153,4 +159,4 @@ class Action(BaseModel):
     def needs_settle(self) -> bool:
         """Actions after which the loop must wait + re-observe (PRD §16)."""
         return self.type in ("click", "double_click", "right_click", "type",
-                             "press", "click_type", "goto")
+                             "press", "click_type", "goto", "activate")

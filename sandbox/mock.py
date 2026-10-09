@@ -15,6 +15,8 @@ HEIGHT = 800
 
 
 class MockSandbox:
+    supports_local_actions = True  # records activate like the local lane
+
     def __init__(self, width: int = WIDTH, height: int = HEIGHT) -> None:
         self.width = width
         self.height = height

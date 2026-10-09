@@ -48,7 +48,7 @@ class SecurityPolicy:
 
     allowed_actions: set[str] = field(default_factory=lambda: {
         "click", "double_click", "right_click", "move", "type", "press",
-        "scroll", "wait", "click_type", "goto", "done"})
+        "scroll", "wait", "click_type", "goto", "activate", "done"})
     allowed_domains: list[str] | None = None  # None = any https domain
     auto_confirm_destructive: bool = False  # CONFIRM_DESTRUCTIVE=1 to allow
     max_exec_seconds: float = 60.0
