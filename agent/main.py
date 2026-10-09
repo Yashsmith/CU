@@ -140,7 +140,8 @@ async def run_task(task: str, args: argparse.Namespace) -> int:
                 executor.bind("browser", browser)
 
         judge = None
-        if args.verify:            async def judge(messages, _adapter=adapter):  # noqa: B023
+        if args.verify:
+            async def judge(messages, _adapter=adapter):  # noqa: B023
                 complete = getattr(_adapter, "complete_text", None)
                 if complete is None:
                     for attr in ("inner", "model"):  # code adapters nest; groq wraps

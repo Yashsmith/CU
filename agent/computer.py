@@ -67,9 +67,10 @@ class Computer:
         """Execute one canonical action (PRD §15-16). done is rejected here."""
         if self._policy is not None:
             self._policy.enforce(action)  # deny/confirm BEFORE any effect
-        if action.type == "activate" and not getattr(
-                self.backend, "supports_local_actions", False):
-            raise ValueError("activate is local-Mac-lane only")
+        if action.type == "activate":
+            if not getattr(self.backend, "supports_local_actions", False):
+                raise ValueError("activate is local-Mac-lane only")
+            return await self.backend.act({"type": "activate", "text": action.text})
         if action.is_terminal:
             raise ValueError("done is control-plane only and cannot be executed")
         if action.type == "click_type":
