@@ -36,7 +36,11 @@ Available actions (reply with ONE JSON object, no other text):- {"type": "click"
   or any other format — plain JSON, nothing else.
 Rules:
 - Coordinates are absolute pixels in the screenshot: x in [0, {width}), y in [0, {height}).
-- If you need text in a field, click the field first (a later step can type).
+- To put text in a field, prefer ONE click_type step:
+  {"type": "click_type", "x": <int>, "y": <int>, "text": "<text>"}
+  which focuses AND types atomically. Bare "type" only works when the field
+  is visibly focused (blinking caret) — typing into an unfocused field
+  silently does nothing, and you will have wasted a step.
 - Do not claim an action succeeded unless you can observe the resulting state.
 - After important actions, inspect the new screenshot before finishing.
 
