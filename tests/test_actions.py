@@ -57,3 +57,21 @@ def test_needs_settle_flags():
     assert not Action(type="move", x=1, y=1).needs_settle
     assert not Action(type="wait", seconds=1).needs_settle
     assert not Action(type="done").needs_settle
+
+
+def test_cross_platform_key_normalization(monkeypatch):
+    import sandbox.local as sl
+
+    monkeypatch.setattr(sl, "IS_WINDOWS", True)
+    monkeypatch.setattr(sl, "IS_MAC", False)
+    assert sl._normalize_key("cmd") == "ctrl"
+    assert sl._normalize_key("command") == "ctrl"
+    assert sl._normalize_key("opt") == "alt"
+    assert sl._normalize_key("win") == "win"
+
+    monkeypatch.setattr(sl, "IS_WINDOWS", False)
+    monkeypatch.setattr(sl, "IS_MAC", True)
+    assert sl._normalize_key("cmd") == "command"
+    assert sl._normalize_key("opt") == "option"
+    assert sl._normalize_key("win") == "command"
+

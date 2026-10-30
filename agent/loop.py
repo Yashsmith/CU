@@ -1,321 +1,176 @@
-"""PRD §15-16 + §20-21 agent loop: observe -> decide -> act -> observe ...
+"""Agent loop: observe → decide → act → observe …
 
-V1 path (model.decide, desktop lane, verify=False) is behavior-identical.
-V2 additions (all opt-in, all default-off): ModelAdapter (+code results),
-browser lane, verification + recovery (PRD §§28-32).
+Simple, robust, no V2 complexity. Runs until:
+  done        — model signals task complete
+  max_steps   — step limit hit
+  timeout     — time limit hit
+  loop        — same click 3× at the same spot
+  error       — unrecoverable model or execution error
+  failsafe    — human grabbed the mouse (pyautogui corner abort)
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any, Optional, Union
 
 from .actions import Action
 from .computer import Computer
-from .sessions import SessionStore  # noqa: F401  (re-export; store lives in sessions.py)
 
-LOOP_GUARD_RADIUS = 10
+LOOP_GUARD_RADIUS = 15
 LOOP_GUARD_REPEATS = 3
 
 
 @dataclass
 class LoopResult:
-    status: str  # done | max_steps | timeout | loop_detected | model_error
-    #            | recovery_exhausted | stopped | paused
+    status: str          # done | max_steps | timeout | loop | error | failsafe
     steps: int
     task: str
-    session_id: str
     session_dir: str
     history: list[dict[str, Any]] = field(default_factory=list)
-    events: list[dict[str, Any]] = field(default_factory=list)
 
 
-def _model_label(model: Any, adapter: Any, model_name: str) -> str:
-    if model_name:
-        return model_name
-    for obj in (model, adapter):
-        label = getattr(obj, "model", None)
-        if isinstance(label, str) and label:
-            return label
-    inner = getattr(adapter, "model", None)  # e.g. GroqVisionAdapter.model
-    label = getattr(inner, "model", None)
-    if isinstance(label, str) and label:
-        return label
-    return "?"
-
-
-def _is_failsafe(error: Exception) -> bool:
-    """pyautogui FailSafeException means the human grabbed the mouse —
-    treat as operator takeover, never as a retryable error."""
-    return type(error).__name__ == "FailSafeException"
-
-
-def _same_spot(a: Action, b: Action, radius: int = LOOP_GUARD_RADIUS) -> bool:
-    if a.type != b.type or a.x is None or b.x is None or a.y is None or b.y is None:
+def _same_spot(a: Action, b: Action, r: int = LOOP_GUARD_RADIUS) -> bool:
+    if a.type != b.type or None in (a.x, b.x, a.y, b.y):
         return False
-    return abs(a.x - b.x) <= radius and abs(a.y - b.y) <= radius
+    return abs(a.x - b.x) <= r and abs(a.y - b.y) <= r   # type: ignore[operator]
+
+
+def _is_failsafe(err: Exception) -> bool:
+    return type(err).__name__ == "FailSafeException"
 
 
 async def run(
     task: str,
     model: Any,
     computer: Computer,
+    *,
     max_steps: int = 30,
-    max_runtime: float = 300,
+    max_runtime: float = 300.0,
     settle_wait: float = 0.5,
-    session_root: str | Path = "sessions",
-    session_id: str | None = None,
-    model_name: str = "",
+    session_root: Union[str, Path] = "sessions",
     verbose: bool = True,
-    # ---- V2 opt-ins (PRD §§28-32, 34). All default to V1 behavior. ----
-    adapter: Any | None = None,  # ModelAdapter (V2 brain); else model.decide
-    lane: str = "desktop",  # "desktop" | "browser"
-    browser: Any | None = None,  # PlaywrightBrowser for lane="browser"/goto
-    verify: bool = False,  # PRD §31 verification after significant actions
-    judge: Callable[[list[dict[str, Any]]], Awaitable[str]] | None = None,
-    max_recovery: int = 2,  # PRD §32 MAX_RETRIES (only when verify=True)
-    control: Any | None = None,  # ControlState for pause/takeover (PRD §34)
-    resume_from: str | None = None,  # PRD §33: seed history from a past session
 ) -> LoopResult:
-    """Run until done / limits / loop / error (V1) / recovery-exhausted / paused (V2)."""
-    from .recovery import RecoveryPolicy, alternate_action
-    from .verify import verify_action
+    """Main agent loop. model must implement decide(task, screenshot, …)."""
 
-    store = SessionStore(session_root, session_id)
-    history: list[dict[str, Any]] = []
-    step = 0
-    if resume_from:
-        prev = SessionStore.load(session_root, resume_from)
-        history = [dict(h) for h in prev.history]
-        step = prev.step
-        note = (f"continuing after step {prev.step} "
-                f"(status was {prev.status})")
-        if lane == "local":
-            # The Mac screen kept living while parked: the frontmost app is
-            # almost certainly NOT what history assumes. Re-establish first.
-            note += (" IMPORTANT: re-activate the target app with an "
-                     "'activate' action before clicking/typing anything.")
-        history.append({"resumed_from": resume_from, "note": note})
-    store.write_meta(task, _model_label(model, adapter, model_name),
-                     extra={"resumed_from": resume_from or ""})
-    store.set_step(step)
-    events: list[dict[str, Any]] = []
-    recent_clicks: list[Action] = []
-    state: dict[str, Any] = {}
-    policy = RecoveryPolicy(max_retries=max_recovery)
-    pending: Action | None = None
-    recovering = verify  # recovery engages only in V2 verify mode (V1: legacy continue)
-    start = time.monotonic()
-    width, height = 1280, 800
-    try:
-        if lane == "browser" and browser is not None:
-            width, height = browser.width, browser.height
-        else:
-            width, height = await computer.size()
-    except Exception:
-        pass
+    # ── Session directory (simple: just mkdir + events.jsonl) ────────────────
+    session_root = Path(session_root)
+    session_dir = session_root / _new_session_id()
+    session_dir.mkdir(parents=True, exist_ok=True)
+    events_path = session_dir / "events.jsonl"
 
-    def emit(ev: dict[str, Any]) -> None:
-        events.append(store.log_event(ev))
+    def log(ev: dict[str, Any]) -> None:
+        with events_path.open("a") as f:
+            f.write(json.dumps(ev) + "\n")
         if verbose:
-            step = ev.get("step", "-")
-            print(f"[step {step}] {ev.get('kind')}: {ev.get('detail', '')}", flush=True)
+            print(f"[step {ev.get('step','-')}] {ev.get('kind')}: {ev.get('detail','')}", flush=True)
 
-    async def observe() -> bytes:
-        if lane == "browser":
-            if browser is None:
-                raise RuntimeError("lane=browser but no browser attached")
-            return await browser.screenshot()
-        return await computer.screenshot()
+    history: list[dict[str, Any]] = []
+    recent_clicks: list[Action] = []
+    consecutive_waits = 0
+    previous_shot: Optional[bytes] = None
+    step = 0
+    start = time.monotonic()
 
-    async def do_execute(action: Action) -> dict[str, Any]:
-        if action.type == "goto" or lane == "browser":
-            if browser is None:
-                raise RuntimeError("browser action but no browser attached")
-            return await browser.exec(action)
-        return await computer.execute(action)
+    try:
+        width, height = await computer.size()
+    except Exception:
+        width, height = 1280, 800
 
-    def finish(status: str, step: int) -> LoopResult:
-        store.finish(status)
-        return LoopResult(status, step, task, store.session_id, str(store.dir),
-                          history, events)
-
-    previous_shot: bytes | None = None
     while True:
-        if control is not None and control.paused():
-            emit({"kind": "control", "step": step, "detail": "paused by operator"})
-            store.finish("paused")
-            return LoopResult("paused", step, task, store.session_id, str(store.dir),
-                              history, events)
-        if control is not None and control.should_stop():
-            emit({"kind": "control", "step": step, "detail": "stopped by operator"})
-            return finish("stopped", step)
+        # ── Guard: limits ────────────────────────────────────────────────────
         if time.monotonic() - start > max_runtime:
-            emit({"kind": "limit", "step": step, "detail": f"MAX_RUNTIME {max_runtime}s exceeded"})
-            return finish("timeout", step)
+            log({"kind": "limit", "step": step, "detail": f"MAX_RUNTIME {max_runtime}s"})
+            return LoopResult("timeout", step, task, str(session_dir), history)
         if step >= max_steps:
-            emit({"kind": "limit", "step": step, "detail": f"MAX_STEPS {max_steps} exceeded"})
-            return finish("max_steps", step)
+            log({"kind": "limit", "step": step, "detail": f"MAX_STEPS {max_steps}"})
+            return LoopResult("max_steps", step, task, str(session_dir), history)
+
         step += 1
-        store.set_step(step)
+
+        # ── Observe ──────────────────────────────────────────────────────────
         try:
-            shot = await observe()
+            shot = await computer.screenshot()
         except Exception as e:
-            emit({"kind": "error", "step": step, "detail": f"screenshot failed: {e}"})
-            return finish("model_error", step)
-        store.save_shot(step, shot)
+            log({"kind": "error", "step": step, "detail": f"screenshot: {e}"})
+            return LoopResult("error", step, task, str(session_dir), history)
 
-        # ---- decide (fresh) or pending recovery action ----
-        code_request = None
-        batched: list[Action] = []
-        from_pending = pending is not None
-        if pending is not None:
-            action = pending
-            pending = None
-            emit({"kind": "decide", "step": step,
-                  "detail": {"recovery": action.model_dump()}})
-        else:
-            try:
-                if adapter is not None:
-                    from .adapters import Observation
+        # Save screenshot
+        shot_path = session_dir / f"step_{step:03d}.png"
+        shot_path.write_bytes(shot)
 
-                    obs = Observation(task=task, screenshot=shot, width=width,
-                                      height=height, history=history,
-                                      previous_screenshot=previous_shot,
-                                      lane=lane)
-                    res = await adapter.run(task, obs, state)
-                    if res.reasoning.startswith("previous_response_id="):
-                        state["previous_response_id"] = res.reasoning.split("=", 1)[1]
-                    if res.done:
-                        store.save_shot(step, shot, final=True)
-                        history.append({"done": True})
-                        emit({"kind": "done", "step": step, "detail": "task complete"})
-                        return finish("done", step)
-                    if res.code is not None:
-                        code_request = res.code
-                        action = Action(type="wait", seconds=0.1)  # placeholder
-                    else:
-                        if not res.actions:
-                            raise ValueError("adapter returned no actions")
-                        action, batched = res.actions[0], res.actions[1:]
-                else:
-                    action = await model.decide(
-                        task=task, screenshot=shot, history=history,
-                        width=width, height=height, previous_screenshot=previous_shot)
-            except Exception as e:
-                emit({"kind": "error", "step": step, "detail": f"model decide failed: {e}"})
-                return finish("model_error", step)
+        # ── Decide ───────────────────────────────────────────────────────────
+        try:
+            action = await model.decide(
+                task=task,
+                screenshot=shot,
+                history=history,
+                width=width,
+                height=height,
+                previous_screenshot=previous_shot,
+            )
+        except Exception as e:
+            log({"kind": "error", "step": step, "detail": f"model: {e}"})
+            return LoopResult("error", step, task, str(session_dir), history)
+
+        log({"kind": "decide", "step": step, "detail": action.model_dump()})
         previous_shot = shot
-        if code_request is None:
-            emit({"kind": "decide", "step": step, "detail": action.model_dump()})
 
-        if code_request is None and action.is_terminal:
-            store.save_shot(step, shot, final=True)
-            store.finish("done")
+        # ── Terminal ─────────────────────────────────────────────────────────
+        if action.is_terminal:
+            # Save final screenshot
+            (session_dir / "final.png").write_bytes(shot)
             history.append({"action": action.model_dump()})
-            emit({"kind": "done", "step": step, "detail": "task complete"})
-            return finish("done", step)
+            log({"kind": "done", "step": step, "detail": "task complete"})
+            return LoopResult("done", step, task, str(session_dir), history)
 
-        # Anti-loop guard on freshly decided clicks (recovery retries exempt).
-        if code_request is None and not from_pending and \
-                action.type in ("click", "double_click", "right_click"):
+        # ── Loop guard ───────────────────────────────────────────────────────
+        if action.type == "wait":
+            consecutive_waits += 1
+            if consecutive_waits >= 5:
+                log({"kind": "limit", "step": step,
+                     "detail": f"stopped after {consecutive_waits} consecutive waits"})
+                (session_dir / "final.png").write_bytes(shot)
+                return LoopResult("timeout", step, task, str(session_dir), history)
+        else:
+            consecutive_waits = 0
+
+        if action.type in ("click", "double_click", "right_click"):
             recent_clicks.append(action)
             recent_clicks = recent_clicks[-LOOP_GUARD_REPEATS:]
             if (len(recent_clicks) == LOOP_GUARD_REPEATS
                     and all(_same_spot(recent_clicks[0], c) for c in recent_clicks[1:])):
-                emit({"kind": "limit", "step": step,
-                      "detail": f"same {action.type} {LOOP_GUARD_REPEATS}x at "
-                                f"({action.x},{action.y}) — stopping"})
-                return finish("loop_detected", step)
-        elif code_request is None:
+                log({"kind": "limit", "step": step,
+                     "detail": f"loop: same {action.type} ×{LOOP_GUARD_REPEATS} "
+                               f"at ({action.x},{action.y})"})
+                return LoopResult("loop", step, task, str(session_dir), history)
+        else:
             recent_clicks.clear()
 
-        # ---- act ----
-        before = shot
-        exec_error: str | None = None
+        # ── Act ──────────────────────────────────────────────────────────────
         try:
-            if code_request is not None:
-                emit({"kind": "decide", "step": step,
-                      "detail": {"code": code_request.code[:300]}})
-                result = await computer.execute_python(code_request.code)
-                state["last_exec"] = (
-                    f"ok={result.ok} stdout={result.stdout[:500]} "
-                    f"error={result.error[:500]} result={result.result[:200]}")
-                history.append({"code": code_request.code[:500],
-                                "result": state["last_exec"]})
-                emit({"kind": "act", "step": step,
-                      "detail": f"code -> {state['last_exec'][:160]}"})
-                if not result.ok and not result.timed_out:
-                    exec_error = f"code failed: {result.error[:200]}"
-            else:
-                result = await do_execute(action)
-                for extra in batched:
-                    await do_execute(extra)
-                history.append({"action": action.model_dump(),
-                                "result": str(result)[:200]})
-                emit({"kind": "act", "step": step,
-                      "detail": f"{action.type} -> {str(result)[:120]}"})
+            result = await computer.execute(action)
+            history.append({"action": action.model_dump(), "result": str(result)[:200]})
+            log({"kind": "act", "step": step,
+                 "detail": f"{action.type} → {str(result)[:120]}"})
         except Exception as e:
             if _is_failsafe(e):
-                # Human grabbed the mouse mid-step: park immediately, like a
-                # takeover. Never retry into a human-held cursor.
-                emit({"kind": "control", "step": step,
-                      "detail": "operator took the mouse (failsafe) — parking"})
-                history.append({"action": (action.model_dump()
-                                           if code_request is None else {"code": True}),
-                                "error": "failsafe: human took control"})
-                return finish("paused", step)
-            exec_error = f"execute failed: {e}"
-            history.append({"action": (action.model_dump()
-                                       if code_request is None else {"code": True}),
-                            "error": str(e)})
-            emit({"kind": "error", "step": step, "detail": exec_error})
-
-        if exec_error and not recovering:
-            continue  # V1 legacy: log and carry on
-
-        # ---- verify + recover (V2, PRD §§31-32) ----
-        if recovering:
-            if exec_error:
-                ok, reason = False, exec_error
-            else:
-                if action.needs_settle and settle_wait > 0:
-                    await asyncio.sleep(settle_wait)
-                try:
-                    after = await observe()
-                except Exception as e:
-                    after = before
-                    ok, reason = False, f"re-observe failed: {e}"
-                else:
-                    if code_request is not None:
-                        from .actions import Action as _A
-
-                        vaction = _A(type="type", text="code")
-                        vres = await verify_action(vaction, before, after, task,
-                                                   judge, force=True)
-                    else:
-                        vres = await verify_action(action, before, after, task, judge)
-                    ok, reason = vres.ok, vres.reason
-                    emit({"kind": "verify", "step": step,
-                          "detail": f"ok={ok} changed={vres.changed} "
-                                    f"score={vres.score} {reason}"[:300]})
-            if ok:
-                policy.note_success()
-            else:
-                decision, detail = policy.next(reason)
-                emit({"kind": "recover", "step": step,
-                      "detail": f"{decision}: {detail}"[:300]})
-                history.append({"recover": decision, "detail": detail[:200]})
-                if decision == "give_up":
-                    return finish("recovery_exhausted", step)
-                if decision == "retry" and code_request is None:
-                    pending = action
-                elif decision == "alternate" and code_request is None:
-                    pending = alternate_action(action)
-                # replan: loop continues; model sees failure in history
+                log({"kind": "failsafe", "step": step,
+                     "detail": "human grabbed mouse — stopping"})
+                return LoopResult("failsafe", step, task, str(session_dir), history)
+            history.append({"action": action.model_dump(), "error": str(e)})
+            log({"kind": "error", "step": step, "detail": f"execute: {e}"})
+            # Don't abort on single action errors — let model adapt
             continue
 
+        # ── Settle ───────────────────────────────────────────────────────────
         if action.needs_settle and settle_wait > 0:
             await asyncio.sleep(settle_wait)
+
+
+def _new_session_id() -> str:
+    import uuid
+    return uuid.uuid4().hex[:12]

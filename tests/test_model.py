@@ -1,4 +1,4 @@
-"""Model adapter tests — offline parsing + mocked decide + 1 gated live call."""
+"""Model adapter tests — offline parsing + mocked decide."""
 import base64
 import os
 
@@ -6,12 +6,10 @@ import pytest
 
 from agent.actions import Action
 from agent.model import GroqModel, build_messages, extract_json
-from sandbox.mock import MockSandbox
 
 
 def _tiny_png() -> bytes:
     import io
-
     from PIL import Image
 
     buf = io.BytesIO()
@@ -34,12 +32,12 @@ def test_build_messages_shape_and_resolution():
     assert msgs[0]["role"] == "system" and "1280x800" in msgs[0]["content"]
     user_content = msgs[1]["content"]
     assert any(p.get("type") == "image_url" for p in user_content)
-    assert "Previous actions" in user_content[0]["text"]
+    assert "Recent actions:" in user_content[0]["text"]
 
 
 async def test_decide_parses_first_try(monkeypatch):
     m = GroqModel(api_key="k")
-    monkeypatch.setattr(m, "_complete", lambda messages: '{"type":"click","x":130,"y":270}')
+    monkeypatch.setattr(m, "_complete", lambda messages, temperature=None: '{"type":"click","x":130,"y":270}')
     a = await m.decide("Open Chromium", _tiny_png())
     assert isinstance(a, Action) and (a.x, a.y) == (130, 270)
 
@@ -48,7 +46,7 @@ async def test_decide_corrective_retry_on_bad_first_reply(monkeypatch):
     m = GroqModel(api_key="k")
     calls = {"n": 0}
 
-    def fake(messages):
+    def fake(messages, temperature=None):
         calls["n"] += 1
         if calls["n"] == 1:
             return "not json at all"
@@ -61,13 +59,13 @@ async def test_decide_corrective_retry_on_bad_first_reply(monkeypatch):
 
 async def test_decide_raises_after_two_failures(monkeypatch):
     m = GroqModel(api_key="k")
-    monkeypatch.setattr(m, "_complete", lambda messages: "garbage!!!")
+    monkeypatch.setattr(m, "_complete", lambda messages, temperature=None: "garbage!!!")
     with pytest.raises(ValueError, match="invalid action twice"):
         await m.decide("t", _tiny_png())
 
 
 async def test_decide_transport_retry(monkeypatch):
-    """API-level 400 (e.g. tool-call instead of JSON) retries warmer once."""
+    """API-level 400 retries once."""
     m = GroqModel(api_key="k")
     calls = {"n": 0}
 
@@ -75,7 +73,6 @@ async def test_decide_transport_retry(monkeypatch):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("400 json_validate_failed")
-        assert temperature == 0.4
         return '{"type": "done"}'
 
     monkeypatch.setattr(m, "_complete", fake)
@@ -94,16 +91,3 @@ async def test_decide_transport_double_failure(monkeypatch):
 def test_model_requires_key():
     with pytest.raises(ValueError):
         GroqModel(api_key="")
-
-
-@pytest.mark.skipif(os.environ.get("RUN_LIVE") != "1" or not os.environ.get("GROQ_API_KEY"),
-                    reason="live Groq call needs RUN_LIVE=1 + GROQ_API_KEY")
-async def test_live_groq_vision_on_mock_desktop():
-    """Smoke: real qwen/qwen3.8-27b sees the synthetic desktop and returns an Action."""
-    key = os.environ["GROQ_API_KEY"]
-    model_name = os.environ.get("MODEL", "qwen/qwen3.8-27b")
-    m = GroqModel(api_key=key, model=model_name)
-    shot = await MockSandbox().screenshot()
-    a = await m.decide("Open Chromium by clicking its icon.", shot)
-    assert isinstance(a, Action)
-    print(f"\nLIVE model action: {a.model_dump()}")

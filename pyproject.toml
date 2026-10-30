@@ -1,37 +1,39 @@
 [project]
-name = "ubs-computer-use"
-version = "0.1.0"
-description = "UBS Computer Use Agent V1 — tiny vision loop + desktop-sandbox execution"
+name = "computer-use"
+version = "2.0.0"
+description = "Computer Use Agent — vision model + real Mac control via pyautogui"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
   "pydantic>=2.0",
-  "httpx>=0.27",
   "groq>=0.11",
-  "openai>=1.40",
   "pillow>=10.0",
-  "playwright>=1.40",
+  "mss>=9.0",
+  "pyautogui>=0.9.54",
+  "textual>=0.50",
 ]
 
 [project.optional-dependencies]
-local = [
-  "mss>=9.0",
-  "pyautogui>=0.9.54",
-]
 dev = [
   "pytest>=8.0",
   "pytest-asyncio>=0.23",
-  "ruff>=0.4",
 ]
+
+[project.scripts]
+computer-use = "agent.main:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 
-[tool.ruff]
-line-length = 100
-target-version = "py311"
-
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = ["tui"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["agent*", "sandbox*"]
+

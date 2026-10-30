@@ -1,30 +1,86 @@
-"""Local Mac/PC body — screenshot via mss, input via pyautogui, focus via osascript.
+"""Cross-platform host desktop body — macOS + Windows.
 
-VISIBLE MODE: this backend drives YOUR screen — cursor glides, apps open in
-front of you. Read-only methods always work; real input needs BOTH:
-  1. ALLOW_REAL_INPUT=1 in the environment (opt-in), AND
-  2. macOS Accessibility permission for your terminal app
-     (System Settings > Privacy & Security > Accessibility), AND
-  3. macOS Screen Recording permission for screenshots (same pane).
+Drives your real screen visually:
+- Screen capture via mss (Retina-scaled on macOS, DPI-aware on Windows)
+- Real mouse movement via pyautogui with smooth glide (you see cursor move)
+- Real keystrokes & hotkeys (auto maps cmd ⇄ ctrl across Mac and Windows)
+- App detection & activation without requiring virtual machines or Docker
 
-Coordinate contract: the model always works in POINTS (pyautogui space).
-Screenshots are downscaled to points when the capture comes back in physical
-pixels (Retina), so screenshot pixels == action coords 1:1. Verified 1:1 on
-the dev Mac (1470x956 both); anything else auto-adapts.
+Requirements:
+- macOS: Terminal granted Accessibility & Screen Recording permissions.
+- Windows: Runs in any standard terminal (Command Prompt, PowerShell, Windows Terminal).
+- Set ALLOW_REAL_INPUT=1 to enable mouse & keyboard movements.
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import platform
 import subprocess
+import sys
 from typing import Any
 
-# pyautogui key names differ per OS; normalize the combos models emit.
-MAC_KEY_ALIASES = {"cmd": "command", "command": "command", "opt": "option",
-                   "option": "option", "ctl": "control", "ctrl": "control",
-                   "control": "control", "alt": "option", "shift": "shift",
-                   "enter": "enter", "return": "enter", "tab": "tab",
-                   "escape": "esc", "esc": "esc", "space": "space",
-                   "backspace": "backspace", "delete": "delete"}
+IS_MAC = sys.platform == "darwin"
+IS_WINDOWS = sys.platform == "win32"
+
+# Enable Per-Monitor DPI awareness on Windows so mss & pyautogui coords are 1:1
+if IS_WINDOWS:
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            import ctypes
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
+
+# Canonical key mappings
+KEY_ALIASES = {
+    "enter": "enter", "return": "enter",
+    "tab": "tab",
+    "escape": "esc", "esc": "esc",
+    "space": "space",
+    "backspace": "backspace",
+    "delete": "delete",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+    "shift": "shift",
+}
+
+# Backward compatibility alias
+MAC_KEY_ALIASES = {
+    "cmd": "command", "command": "command",
+    "opt": "option", "option": "option", "alt": "option",
+    "ctl": "control", "ctrl": "control", "control": "control",
+    "shift": "shift", "enter": "enter", "return": "enter",
+    "tab": "tab", "escape": "esc", "esc": "esc",
+    "space": "space", "backspace": "backspace", "delete": "delete",
+    "up": "up", "down": "down", "left": "left", "right": "right",
+}
+
+
+def _normalize_key(key: str) -> str:
+    """Map modifier keys to host OS conventions."""
+    k = key.strip().lower()
+    if IS_WINDOWS:
+        if k in ("cmd", "command"):
+            return "ctrl"
+        if k in ("opt", "option"):
+            return "alt"
+        if k in ("win", "windows", "super"):
+            return "win"
+        if k in ("ctrl", "control", "ctl"):
+            return "ctrl"
+    else:
+        if k in ("cmd", "command"):
+            return "command"
+        if k in ("opt", "option", "alt"):
+            return "option"
+        if k in ("ctrl", "control", "ctl"):
+            return "control"
+        if k in ("win", "windows", "super"):
+            return "command"
+    return KEY_ALIASES.get(k, k)
 
 
 class RealInputDisabled(RuntimeError):
@@ -35,42 +91,98 @@ def real_input_enabled() -> bool:
     return os.environ.get("ALLOW_REAL_INPUT", "0") == "1"
 
 
-def to_points(img: Any, points_w: int, points_h: int) -> Any:
-    """Downscale a physical-pixel capture to logical points (no-op if equal)."""
-    if img.width == points_w and img.height == points_h:
-        return img
-    return img.resize((points_w, points_h))
+def _points_size() -> tuple[int, int]:
+    try:
+        import pyautogui
+        s = pyautogui.size()
+        return int(s.width), int(s.height)
+    except Exception:
+        return 1470, 956
 
 
 def frontmost_app() -> str:
-    """Name of the frontmost app (read-only, no permission needed)."""
-    out = subprocess.run(
-        ["osascript", "-e",
-         'tell application "System Events" to get name of first application '
-         'process whose frontmost is true'],
-        capture_output=True, text=True, timeout=10)
-    return out.stdout.strip()
+    """Get the active/frontmost application title across macOS and Windows."""
+    if IS_MAC:
+        try:
+            out = subprocess.run(
+                ["osascript", "-e",
+                 "tell application \"System Events\" to get name of first application "
+                 "process whose frontmost is true"],
+                capture_output=True, text=True, timeout=5)
+            return out.stdout.strip() or "Desktop"
+        except Exception:
+            return "Desktop"
+    elif IS_WINDOWS:
+        try:
+            import ctypes
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            if not hwnd:
+                return "Desktop"
+            length = ctypes.windll.user32.GetWindowTextLengthW(hwnd)
+            buf = ctypes.create_unicode_buffer(length + 1)
+            ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
+            return buf.value or "Desktop"
+        except Exception:
+            return "Desktop"
+    else:
+        return "Desktop"
 
 
-def activate_app(name: str, timeout: int = 15) -> str:
-    """Launch (if needed) + bring to front. Returns frontmost app name after."""
-    safe = name.replace('"', "")
-    if not safe.strip():
-        raise ValueError("activate needs an application name")
-    proc = subprocess.run(
-        ["osascript", "-e", f'tell application "{safe}" to activate'],
-        capture_output=True, text=True, timeout=timeout)
-    if proc.returncode != 0:
-        raise RuntimeError(f"could not activate {safe!r}: {proc.stderr.strip()[:200]}")
+def activate_app(name: str) -> str:
+    """Launch or focus application across macOS and Windows."""
+    safe = name.replace('"', "").strip()
+    if not safe:
+        raise ValueError("activate_app: name must not be empty")
+
+    if IS_MAC:
+        proc = subprocess.run(
+            ["osascript", "-e", f'tell application "{safe}" to activate'],
+            capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            # Fallback to open -a
+            subprocess.run(["open", "-a", safe], capture_output=True, timeout=10)
+    elif IS_WINDOWS:
+        try:
+            subprocess.run(f'start "" "{safe}"', shell=True, timeout=5)
+        except Exception as e:
+            raise RuntimeError(f"cannot activate {safe!r}: {e}")
     return frontmost_app()
 
 
-class LocalSandbox:
-    supports_local_actions = True  # activate/frontmost lane (cf. Computer.execute)
+def open_new_chrome_tab(url: str = "") -> None:
+    """Open a new tab in the existing Chrome browser."""
+    if IS_MAC:
+        script = f'''
+tell application "Google Chrome"
+    activate
+    if (count of windows) = 0 then
+        make new window
+    end if
+    tell front window
+        make new tab{"" if not url else f' with properties {{URL:"{url}"}}'}
+    end tell
+end tell
+'''
+        subprocess.run(["osascript", "-e", script], timeout=10)
+    else:
+        target = url or "about:blank"
+        subprocess.run(f'start chrome "{target}"', shell=True, timeout=5)
 
-    def __init__(self, glide: float = 0.3) -> None:
+
+class LocalSandbox:
+    """Drive the real Mac / Windows display via pyautogui + mss with smooth glide."""
+
+    supports_local_actions = True
+
+    def __init__(self, glide: float = 0.35) -> None:
         self._actions: list[dict[str, Any]] = []
-        self.glide = glide  # visible cursor glide time per move (seconds)
+        self.glide = glide  # cursor move duration in seconds (smooth visible motion)
+
+    def _require_input(self) -> None:
+        if not real_input_enabled():
+            raise RealInputDisabled(
+                "Real mouse/keyboard input is disabled. "
+                "Set ALLOW_REAL_INPUT=1 to enable.")
 
     async def health(self) -> dict[str, Any]:
         w, h = await self.size()
@@ -78,18 +190,23 @@ class LocalSandbox:
             front = frontmost_app()
         except Exception:
             front = "?"
-        return {"ok": True, "display": "local", "width": w, "height": h,
-                "backend": "local", "real_input": real_input_enabled(),
-                "frontmost": front}
+        return {
+            "ok": True,
+            "backend": "local",
+            "os": platform.system(),
+            "display": f"{w}x{h}",
+            "real_input": real_input_enabled(),
+            "frontmost": front,
+        }
 
-    def _points(self) -> tuple[int, int]:
+    async def size(self) -> tuple[int, int]:
         try:
-            import pyautogui
-
-            s = pyautogui.size()
-            return int(s.width), int(s.height)
+            from mss import MSS
+            with MSS() as sct:
+                m = sct.monitors[1]
+                return int(m["width"]), int(m["height"])
         except Exception:
-            return 1470, 956
+            return _points_size()
 
     async def screenshot(self) -> bytes:
         try:
@@ -97,84 +214,88 @@ class LocalSandbox:
             from mss import MSS
             from PIL import Image
         except ImportError as e:
-            raise RuntimeError("local backend needs: pip install 'ubs-computer-use[local]'") from e
+            raise RuntimeError(
+                "Missing dependencies. Run: pip install mss pillow pyautogui") from e
         with MSS() as sct:
             mon = sct.monitors[1]
-            shot = sct.grab(mon)
-            img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-        img = to_points(img, *self._points())
+            raw = sct.grab(mon)
+            img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+
+        # Downscale Retina captures to logical points so coordinates are 1:1
+        pw, ph = _points_size()
+        if img.width != pw or img.height != ph:
+            img = img.resize((pw, ph))
+
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return buf.getvalue()
 
-    def _require_input(self) -> None:
-        if not real_input_enabled():
-            raise RealInputDisabled(
-                "Refusing real mouse/keyboard input: set ALLOW_REAL_INPUT=1 to opt in.")
-
     async def act(self, payload: dict[str, Any]) -> dict[str, Any]:
         self._require_input()
         try:
-            import asyncio
-
             import pyautogui
         except ImportError as e:
-            raise RuntimeError("local backend needs: pip install 'ubs-computer-use[local]'") from e
+            raise RuntimeError("Missing pyautogui. Run: pip install pyautogui") from e
+
         self._actions.append(dict(payload))
-        t = payload.get("type")
         pyautogui.FAILSAFE = True
-        if t == "activate":
-            front = activate_app(str(payload.get("text", "")))
-            return {"ok": True, "result": f"frontmost={front}", "action": payload}
+        t = payload.get("type")
+
+        # ── Visual cursor movements ───────────────────────────────────────────
         if t in ("move", "click", "double_click", "right_click", "click_type"):
             x, y = int(payload.get("x", 0)), int(payload.get("y", 0))
-            if t == "move":
-                pyautogui.moveTo(x, y, duration=self.glide)
-            elif t == "click":
-                pyautogui.moveTo(x, y, duration=self.glide)
+            # Smoothly glide cursor so user watches it move to target
+            pyautogui.moveTo(x, y, duration=self.glide)
+
+            if t == "click":
                 pyautogui.click()
             elif t == "double_click":
-                pyautogui.moveTo(x, y, duration=self.glide)
                 pyautogui.doubleClick()
             elif t == "right_click":
-                pyautogui.moveTo(x, y, duration=self.glide)
                 pyautogui.rightClick()
             elif t == "click_type":
-                pyautogui.moveTo(x, y, duration=self.glide)
                 pyautogui.click()
-                await asyncio.sleep(0.3)
-                pyautogui.typewrite(str(payload.get("text", "")), interval=0.02)
+                await asyncio.sleep(0.2)
+                pyautogui.typewrite(str(payload.get("text", "")), interval=0.03)
+
         elif t == "type":
-            pyautogui.typewrite(str(payload.get("text", "")), interval=0.02)
+            pyautogui.typewrite(str(payload.get("text", "")), interval=0.03)
+
         elif t == "key":
-            await self._press_combo(pyautogui, str(payload.get("combo", "")))
+            combo = str(payload.get("combo", ""))
+            await self._press_combo(pyautogui, combo)
+
         elif t == "scroll":
             amt = int(payload.get("amount", 3))
             if payload.get("direction") == "up":
                 amt = -abs(amt)
-            pyautogui.scroll(abs(amt) * 100 * (1 if amt >= 0 else -1))
+            pyautogui.scroll(amt * 3)
+
         elif t == "wait":
             await asyncio.sleep(float(payload.get("seconds", 0.5)))
-        return {"ok": True, "result": "local-applied", "action": payload}
+
+        elif t == "activate":
+            name = str(payload.get("text", ""))
+            front = activate_app(name)
+            return {"ok": True, "result": f"frontmost={front}"}
+
+        elif t == "open_chrome_tab":
+            url = str(payload.get("url", ""))
+            open_new_chrome_tab(url)
+            return {"ok": True, "result": "chrome tab opened"}
+
+        return {"ok": True, "result": "applied", "action": payload}
 
     async def _press_combo(self, pyautogui: Any, combo: str) -> None:
-        parts = [MAC_KEY_ALIASES.get(p.strip().lower(), p.strip())
-                 for p in combo.split("+") if p.strip()]
+        parts = [
+            _normalize_key(p)
+            for p in combo.split("+") if p.strip()
+        ]
         if len(parts) > 1:
             *mods, final = parts
             pyautogui.hotkey(*mods, final)
         elif parts:
             pyautogui.press(parts[0])
 
-    async def size(self) -> tuple[int, int]:
-        try:
-            from mss import MSS
-
-            with MSS() as sct:
-                mon = sct.monitors[1]
-                return int(mon["width"]), int(mon["height"])
-        except Exception:
-            return 1280, 800
-
     async def close(self) -> None:
-        return None
+        pass
